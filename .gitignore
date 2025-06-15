@@ -1,0 +1,98 @@
+# Julia specific
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+.julia_history
+startup.jl
+deps/deps.jl
+deps/build.log
+deps/downloads/
+docs/build/
+docs/site/
+LocalPreferences.toml
+
+# Compiled files
+*.so
+*.dylib
+*.dll
+
+# Package files
+Manifest.toml
+
+# Temporary files
+*.tmp
+*.temp
+*~
+
+# Checkpoints and model files
+checkpoints/
+*.jld2
+*.bson
+*.h5
+*.hdf5
+
+# Figure and output files
+figures/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.pdf
+*.eps
+
+# Data files (optional - uncomment if you don't want to track data)
+# data/
+# *.csv
+# *.txt
+# *.json
+# *.mat
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter notebooks checkpoints
+.ipynb_checkpoints/
+
+# Python cache (in case of PyCall usage)
+__pycache__/
+*.pyc
+*.pyo
+
+# R files (in case of RCall usage)
+.Rhistory
+.RData
+.Rproj.user
+
+# Log files
+*.log
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE_BIN/
+*.dmg
+*.app
