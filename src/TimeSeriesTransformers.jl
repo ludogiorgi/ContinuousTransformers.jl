@@ -1,7 +1,7 @@
 module TimeSeriesTransformers
 
-import Flux
-import Flux: Dense, Dropout, LayerNorm, softmax, relu
+using Flux
+using Flux: Dense, Dropout, LayerNorm, softmax, relu
 using LinearAlgebra
 using Random
 using Statistics

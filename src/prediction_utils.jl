@@ -176,3 +176,147 @@ function analyze_prediction_horizon_scaling(model::ContinuousTransformerModel,
     
     return n_pred_horizons, rmse_scaling, rmse_scaling_std, nothing
 end
+
+using Statistics
+using Plots
+
+"""
+    predict_next_values(model, input_sequence, n_steps=1)
+
+Predict next values using the trained model.
+"""
+function predict_next_values(model, input_sequence::AbstractArray, n_steps::Int=1)
+    # Ensure input is 3D: (features, seq_len, batch_size)
+    if ndims(input_sequence) == 2
+        input_sequence = reshape(input_sequence, size(input_sequence)..., 1)
+    end
+    
+    predictions = model(input_sequence)  # Shape: (output_dim, seq_len, batch_size, n_ode_steps)
+    
+    # Return final time step predictions
+    return predictions[:, :, :, end]
+end
+
+"""
+    combined_prediction_analysis(model, val_inputs, val_targets; kwargs...)
+
+Combined prediction analysis with ensemble predictions and horizon scaling.
+"""
+function combined_prediction_analysis(
+    model, val_inputs, val_targets;
+    n_ens=100, seq_len=32, n_preds_example=50, max_n_preds=100, n_pred_steps=10, seed=42, dt=0.01
+)
+    Random.seed!(seed)
+    
+    # Generate ensemble predictions
+    ensemble_preds, ensemble_obs, _ = generate_ensemble_predictions(
+        model, val_inputs, val_targets, n_ens, seq_len, n_preds_example
+    )
+    
+    # Analyze prediction horizon scaling
+    horizons, rmse_values = analyze_prediction_horizon_scaling(
+        model, val_inputs, val_targets, max_n_preds, n_pred_steps, seq_len
+    )
+    
+    # Create combined plot
+    p1 = plot(ensemble_obs[1:min(200, end)], label="Observed", color=:black, linewidth=2)
+    plot!(p1, ensemble_preds[1:min(200, end)], label="Predicted", color=:red, linewidth=1, alpha=0.7)
+    xlabel!(p1, "Time Step")
+    ylabel!(p1, "Value")
+    title!(p1, "Ensemble Prediction Example")
+    
+    p2 = plot(horizons .* dt, rmse_values, marker=:circle, linewidth=2)
+    xlabel!(p2, "Prediction Horizon (time units)")
+    ylabel!(p2, "RMSE")
+    title!(p2, "Prediction Horizon Scaling")
+    
+    combined_plot = plot(p1, p2, layout=(2,1), size=(800, 600))
+    
+    return combined_plot, ensemble_preds, ensemble_obs, horizons, rmse_values
+end
+
+"""
+    generate_ensemble_predictions(model, val_inputs, val_targets, n_ens, seq_len, n_preds)
+
+Generate ensemble predictions for analysis.
+"""
+function generate_ensemble_predictions(model, val_inputs, val_targets, n_ens, seq_len, n_preds)
+    n_val_samples = size(val_inputs, 2)
+    
+    # Randomly select starting points
+    start_indices = rand(1:(n_val_samples - seq_len - n_preds), n_ens)
+    
+    all_preds = Float32[]
+    all_obs = Float32[]
+    
+    for start_idx in start_indices
+        # Get input sequence
+        input_seq = val_inputs[:, start_idx:(start_idx + seq_len - 1)]
+        input_3d = reshape(input_seq, size(input_seq)..., 1)
+        
+        # Get observed values
+        obs_vals = val_targets[1, (start_idx + seq_len):(start_idx + seq_len + n_preds - 1)]
+        
+        # Generate predictions
+        predictions = model(input_3d)
+        pred_vals = predictions[1, :, 1, end]  # Use final time step
+        
+        append!(all_preds, pred_vals[1:min(n_preds, length(pred_vals))])
+        append!(all_obs, obs_vals[1:min(n_preds, length(obs_vals))])
+    end
+    
+    return all_preds, all_obs, start_indices
+end
+
+"""
+    analyze_prediction_horizon_scaling(model, val_inputs, val_targets, max_n_preds, n_pred_steps, seq_len)
+
+Analyze how prediction error scales with horizon.
+"""
+function analyze_prediction_horizon_scaling(model, val_inputs, val_targets, max_n_preds, n_pred_steps, seq_len)
+    horizons = 1:n_pred_steps:max_n_preds
+    rmse_values = Float32[]
+    
+    for horizon in horizons
+        # Generate predictions for this horizon
+        preds, obs, _ = generate_ensemble_predictions(
+            model, val_inputs, val_targets, 50, seq_len, horizon
+        )
+        
+        # Calculate RMSE
+        if length(preds) > 0 && length(obs) > 0
+            min_len = min(length(preds), length(obs))
+            rmse = sqrt(mean((preds[1:min_len] .- obs[1:min_len]).^2))
+            push!(rmse_values, rmse)
+        else
+            push!(rmse_values, NaN32)
+        end
+    end
+    
+    return horizons, rmse_values
+end
+
+"""
+    autocorr(x, lags)
+
+Compute autocorrelation function.
+"""
+function autocorr(x::Vector, lags::AbstractVector{<:Integer})
+    n = length(x)
+    x_centered = x .- mean(x)
+    autocorrs = Float64[]
+    
+    for lag in lags
+        if lag == 0
+            push!(autocorrs, 1.0)
+        elseif lag < n
+            c = sum(x_centered[1:(n-lag)] .* x_centered[(1+lag):n]) / (n - lag)
+            c0 = sum(x_centered.^2) / n
+            push!(autocorrs, c / c0)
+        else
+            push!(autocorrs, 0.0)
+        end
+    end
+    
+    return autocorrs
+end

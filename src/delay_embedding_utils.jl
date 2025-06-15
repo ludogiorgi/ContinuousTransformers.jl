@@ -2,62 +2,93 @@
     DelayEmbeddingProcessor
 
 Processor for creating delay embeddings from time series data with optional normalization.
+Supports both univariate (Vector) and multivariate (Matrix) time series.
 """
 
 struct DelayEmbeddingProcessor
-    original_data::Vector{Float32}
-    normalized_data::Vector{Float32}
+    original_data::Matrix{Float32}     # Shape: (n_features, n_timesteps)
+    normalized_data::Matrix{Float32}   # Shape: (n_features, n_timesteps)
     embedding_dim::Int
-    embedded_data::Matrix{Float32}
+    embedded_data::Matrix{Float32}     # Shape: (n_samples, n_features * embedding_dim)
     # Normalization parameters
-    data_mean::Float32
-    data_std::Float32
+    data_mean::Vector{Float32}         # Per-feature means
+    data_std::Vector{Float32}          # Per-feature standard deviations
     normalize::Bool
-    
-    function DelayEmbeddingProcessor(data::Vector{<:Real}, embedding_dim::Int; normalize::Bool=true)
-        data_f32 = Float32.(data)
-        
-        # Compute normalization parameters
-        if normalize
-            data_mean = Float32(Statistics.mean(data_f32))
-            data_std = Float32(Statistics.std(data_f32))
-            # Avoid division by zero
-            if data_std < 1e-8
-                @warn "Data has very small standard deviation ($data_std), using std=1.0"
-                data_std = 1.0f0
-            end
-            normalized_data = (data_f32 .- data_mean) ./ data_std
+    n_features::Int
+end
+
+# Define constructor as a separate function to ensure proper type handling
+function DelayEmbeddingProcessor(data::Union{AbstractVector{<:Real}, AbstractMatrix{<:Real}}, embedding_dim::Int; normalize::Bool=true)
+    # Convert input to 2D matrix format: (n_features, n_timesteps)
+    if data isa AbstractVector
+        data_matrix = reshape(Float32.(data), 1, :)  # Shape: (1, n_timesteps)
+        n_features = 1
+    else
+        # Handle Matrix input - check if it's (n_timesteps, n_features) format
+        if size(data, 2) == 1 || size(data, 1) > size(data, 2)
+            # Likely (n_timesteps, n_features) format, transpose to (n_features, n_timesteps)
+            data_matrix = Float32.(data')  
         else
-            data_mean = 0.0f0
-            data_std = 1.0f0
-            normalized_data = copy(data_f32)
+            # Already (n_features, n_timesteps) format
+            data_matrix = Float32.(data)   
+        end
+        n_features = size(data_matrix, 1)
+    end
+    
+    # Compute normalization parameters per feature
+    if normalize
+        data_mean = vec(Statistics.mean(data_matrix, dims=2))  
+        data_std = vec(Statistics.std(data_matrix, dims=2))    
+        
+        # Avoid division by zero
+        for i in 1:length(data_std)
+            if data_std[i] < 1e-8
+                @warn "Feature $i has very small standard deviation ($(data_std[i])), using std=1.0"
+                data_std[i] = 1.0f0
+            end
         end
         
-        # Create delay embedding from normalized data
-        embedded = create_delay_embedding(normalized_data, embedding_dim)
-        new(data_f32, normalized_data, embedding_dim, embedded, data_mean, data_std, normalize)
+        # Normalize each feature
+        normalized_data = (data_matrix .- data_mean) ./ data_std
+    else
+        data_mean = zeros(Float32, n_features)
+        data_std = ones(Float32, n_features)
+        normalized_data = copy(data_matrix)
     end
+    
+    # Create delay embedding from normalized data
+    embedded = create_delay_embedding(normalized_data, embedding_dim)
+    
+    return DelayEmbeddingProcessor(data_matrix, normalized_data, embedding_dim, embedded, data_mean, data_std, normalize, n_features)
 end
 
 """
     create_delay_embedding(data, embedding_dim)
 
-Create delay embedding matrix from 1D time series.
-Returns matrix of size (length(data) - embedding_dim + 1, embedding_dim)
-where each row is [y(t), y(t-1), ..., y(t-embedding_dim+1)]
+Create delay embedding matrix from multivariate time series.
+Input: data matrix of shape (n_features, n_timesteps)
+Returns: embedded matrix of shape (n_samples, n_features * embedding_dim)
+where each row is [f1(t), f2(t), ..., fn(t), f1(t-1), f2(t-1), ..., fn(t-1), ..., f1(t-embedding_dim+1), ..., fn(t-embedding_dim+1)]
 """
-function create_delay_embedding(data::Vector{Float32}, embedding_dim::Int)
-    n = length(data)
-    if n < embedding_dim
-        error("Data length ($n) must be at least embedding dimension ($embedding_dim)")
+function create_delay_embedding(data::Matrix{Float32}, embedding_dim::Int)
+    n_features, n_timesteps = size(data)
+    
+    if n_timesteps < embedding_dim
+        error("Data length ($n_timesteps) must be at least embedding dimension ($embedding_dim)")
     end
     
-    embedded_length = n - embedding_dim + 1
-    embedded = Matrix{Float32}(undef, embedded_length, embedding_dim)
+    n_samples = n_timesteps - embedding_dim + 1
+    embedded = Matrix{Float32}(undef, n_samples, n_features * embedding_dim)
     
-    for i in 1:embedded_length
+    for i in 1:n_samples
         for j in 1:embedding_dim
-            embedded[i, j] = data[i + j - 1]
+            for f in 1:n_features
+                # Column index in embedded matrix
+                col_idx = (j-1) * n_features + f
+                # Time index in original data (newest to oldest)
+                time_idx = i + j - 1
+                embedded[i, col_idx] = data[f, time_idx]
+            end
         end
     end
     
@@ -155,8 +186,8 @@ Convert a normalized value back to original scale using the processor's normaliz
 """
 function denormalize_value(processor::DelayEmbeddingProcessor, normalized_value::Float32)
     if processor.normalize
-        # Use the correct field names from DelayEmbeddingProcessor struct
-        return normalized_value * processor.data_std + processor.data_mean
+        # Handle multivariate case - use first feature's parameters for now
+        return normalized_value * processor.data_std[1] + processor.data_mean[1]
     else
         return normalized_value
     end
@@ -166,33 +197,43 @@ end
     get_embedding_data(processor, dim=1)
 
 Get delay embedding data and targets for transformer training.
-Returns (inputs, targets) where inputs is (embedding_dim, n_samples) and targets is (dim, n_samples).
-The delay embedding is structured so that inputs[end, N] = targets[1, N-1].
+Returns (inputs, targets) where inputs is (embedding_features, n_samples) and targets is (n_features, n_samples).
 """
 function get_embedding_data(processor::DelayEmbeddingProcessor, dim::Int=1)
-    normalized_data = processor.normalized_data
+    normalized_data = processor.normalized_data  # Shape: (n_features, n_timesteps)
     embedding_dim = processor.embedding_dim
+    n_features = processor.n_features
+    n_timesteps = size(normalized_data, 2)
     
     # We need at least embedding_dim + 1 points to create one input-target pair
-    n_samples = length(normalized_data) - embedding_dim
+    n_samples = n_timesteps - embedding_dim
     if n_samples <= 0
         error("Not enough data for embedding dimension $embedding_dim")
     end
     
-    # Input matrix: (embedding_dim, n_samples)
-    inputs = Array{Float32}(undef, embedding_dim, n_samples)
-    # Target matrix: (1, n_samples)
-    targets = Array{Float32}(undef, 1, n_samples)
+    # Input matrix: (n_features * embedding_dim, n_samples)
+    input_features = n_features * embedding_dim
+    inputs = Array{Float32}(undef, input_features, n_samples)
+    # Target matrix: (n_features, n_samples)
+    targets = Array{Float32}(undef, n_features, n_samples)
     
     for i in 1:n_samples
-        # Create delay embedding: [y_{i+embedding_dim-1}, y_{i+embedding_dim-2}, ..., y_i]
-        # This means inputs[1, i] = y_{i+embedding_dim-1} (newest)
-        # and inputs[end, i] = y_i (oldest)
+        # Create delay embedding for sample i
         for j in 1:embedding_dim
-            inputs[j, i] = normalized_data[i + j - 1]
+            for f in 1:n_features
+                # Input feature index
+                input_idx = (j-1) * n_features + f
+                # Time index (newest to oldest)
+                time_idx = i + j - 1
+                inputs[input_idx, i] = normalized_data[f, time_idx]
+            end
         end
-        # Target: y_{i+embedding_dim} (the next value after the embedding window)
-        targets[1, i] = normalized_data[i + embedding_dim]
+        
+        # Target: next values for all features
+        target_time_idx = i + embedding_dim
+        for f in 1:n_features
+            targets[f, i] = normalized_data[f, target_time_idx]
+        end
     end
     
     return inputs, targets

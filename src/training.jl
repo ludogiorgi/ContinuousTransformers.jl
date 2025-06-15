@@ -13,7 +13,8 @@ function train_continuous_transformer!(
     early_stopping_patience::Int = 10,
     verbose::Bool = true,
     n_training_steps_per_epoch::Int = 100, 
-    training_batch_size::Int = 4 
+    training_batch_size::Int = 4,
+    n_future_steps::Int = 10  # Number of future time steps to predict
 )
     
     inputs, targets = get_embedding_data(processor) 
@@ -42,16 +43,15 @@ function train_continuous_transformer!(
     patience_counter = 0
 
     batch_inputs_alloc = Array{Float32}(undef, input_dim, seq_len, training_batch_size)
-    batch_targets_alloc = Array{Float32}(undef, output_dim, seq_len, training_batch_size)
+    batch_targets_alloc = Array{Float32}(undef, output_dim, seq_len, training_batch_size, n_future_steps)
     
     for epoch in 1:epochs
         # Training
         epoch_train_loss = 0f0
         actual_training_steps_this_epoch = 0
         
-        if size(train_inputs_full, 2) < seq_len
-            @warn "Not enough training data for sequence length $seq_len. Skipping epoch $epoch."
-            # Optionally push a marker loss or handle as error
+        if size(train_inputs_full, 2) < seq_len + n_future_steps
+            @warn "Not enough training data for sequence length $seq_len + $n_future_steps future steps. Skipping epoch $epoch."
             push!(train_losses, NaN32) 
             push!(val_losses, NaN32)   
             continue
@@ -59,21 +59,51 @@ function train_continuous_transformer!(
 
         for step in 1:n_training_steps_per_epoch
             for b_idx in 1:training_batch_size 
-                start_idx = rand(1:(size(train_inputs_full, 2) - seq_len + 1))
-                end_idx = start_idx + seq_len - 1
+                # Ensure we have enough data for both input sequence and future targets
+                max_start_idx = size(train_inputs_full, 2) - seq_len - n_future_steps + 1
+                start_idx = rand(1:max_start_idx)
                 
-                copyto!(view(batch_inputs_alloc, :, :, b_idx), view(train_inputs_full, :, start_idx:end_idx))
-                copyto!(view(batch_targets_alloc, :, :, b_idx), view(train_targets_full, :, start_idx:end_idx))
+                # Input sequence
+                input_end_idx = start_idx + seq_len - 1
+                copyto!(view(batch_inputs_alloc, :, :, b_idx), view(train_inputs_full, :, start_idx:input_end_idx))
+                
+                # Target trajectory: consecutive future time steps
+                for t in 1:n_future_steps
+                    # For each time step t, we want the sequence shifted by t positions
+                    target_start = start_idx + t
+                    target_end = min(target_start + seq_len - 1, size(train_targets_full, 2))
+                    
+                    if target_end >= target_start
+                        seq_length = target_end - target_start + 1
+                        copyto!(view(batch_targets_alloc, :, 1:seq_length, b_idx, t), 
+                               view(train_targets_full, :, target_start:target_end))
+                        # Fill remaining positions with the last available value if needed
+                        if seq_length < seq_len
+                            batch_targets_alloc[:, (seq_length+1):seq_len, b_idx, t] .= batch_targets_alloc[:, seq_length, b_idx, t]
+                        end
+                    else
+                        # If we run out of data, use the last available value
+                        batch_targets_alloc[:, :, b_idx, t] .= train_targets_full[:, end]
+                    end
+                end
             end
             
             loss, grads = Flux.withgradient(model) do m
-                predictions = m(batch_inputs_alloc) 
-                Flux.mse(predictions, batch_targets_alloc)
+                predictions = m(batch_inputs_alloc) # Shape: (output_dim, seq_len, training_batch_size, n_steps)
+                
+                # Ensure predictions and targets have compatible dimensions
+                pred_n_steps = size(predictions, 4)
+                target_n_steps = min(pred_n_steps, n_future_steps)
+                
+                # Use only the matching number of time steps
+                pred_subset = predictions[:, :, :, 1:target_n_steps]
+                target_subset = batch_targets_alloc[:, :, :, 1:target_n_steps]
+                
+                Flux.mse(pred_subset, target_subset)
             end
             
             if isnan(loss) || isinf(loss)
                 @warn "Training loss is $loss at epoch $epoch, step $step. Skipping update."
-                # Potentially log parameters or inputs if this happens frequently
                 continue
             end
 
@@ -90,26 +120,54 @@ function train_continuous_transformer!(
         num_val_batches = 0
         
         if size(val_inputs_full, 2) > 0
-            if size(val_inputs_full, 2) < val_seq_len
-                 @warn "Not enough validation data for val_seq_len $val_seq_len. Processing what's available."
+            if size(val_inputs_full, 2) < val_seq_len + n_future_steps
+                 @warn "Not enough validation data for val_seq_len $val_seq_len + $n_future_steps future steps. Processing what's available."
             end
 
-            for val_batch_start_idx in 1:val_seq_len:size(val_inputs_full, 2)
-                val_batch_end_idx = min(val_batch_start_idx + val_seq_len - 1, size(val_inputs_full, 2))
+            for val_batch_start_idx in 1:(val_seq_len + n_future_steps):size(val_inputs_full, 2)
+                val_input_end_idx = min(val_batch_start_idx + val_seq_len - 1, size(val_inputs_full, 2))
                 
-                # Ensure the chunk is not empty (can happen if val_inputs_full size < val_seq_len initially)
-                if val_batch_start_idx > val_batch_end_idx
+                if val_batch_start_idx > val_input_end_idx
                     continue
                 end
 
-                current_val_input_chunk = view(val_inputs_full, :, val_batch_start_idx:val_batch_end_idx)
-                current_val_target_chunk = view(val_targets_full, :, val_batch_start_idx:val_batch_end_idx)
+                current_val_input_chunk = view(val_inputs_full, :, val_batch_start_idx:val_input_end_idx)
                 
-                # Model's 2D input path expects (features, sequence_length)
-                # It will internally reshape to (features, sequence_length, 1)
-                val_predictions_chunk = model(current_val_input_chunk) 
+                # Create validation target trajectory
+                actual_val_seq_len = val_input_end_idx - val_batch_start_idx + 1
+                val_targets_4d = Array{Float32}(undef, output_dim, actual_val_seq_len, 1, n_future_steps)
                 
-                loss_chunk = Flux.mse(val_predictions_chunk, current_val_target_chunk)
+                for t in 1:n_future_steps
+                    target_start = val_batch_start_idx + t
+                    target_end = min(target_start + actual_val_seq_len - 1, size(val_targets_full, 2))
+                    
+                    if target_end >= target_start
+                        seq_length = target_end - target_start + 1
+                        copyto!(view(val_targets_4d, :, 1:seq_length, 1, t), 
+                               view(val_targets_full, :, target_start:target_end))
+                        # Fill remaining positions if needed
+                        if seq_length < actual_val_seq_len
+                            val_targets_4d[:, (seq_length+1):actual_val_seq_len, 1, t] .= val_targets_4d[:, seq_length, 1, t]
+                        end
+                    else
+                        val_targets_4d[:, :, 1, t] .= val_targets_full[:, end]
+                    end
+                end
+                
+                # Reshape validation input to 3D for model
+                val_input_3d = reshape(current_val_input_chunk, size(current_val_input_chunk, 1), size(current_val_input_chunk, 2), 1)
+                
+                val_predictions_chunk = model(val_input_3d) # Shape: (output_dim, seq_len, 1, n_steps)
+                
+                # Ensure compatible dimensions for validation
+                pred_n_steps = size(val_predictions_chunk, 4)
+                target_n_steps = min(pred_n_steps, n_future_steps)
+                
+                pred_subset = val_predictions_chunk[:, :, :, 1:target_n_steps]
+                target_subset = val_targets_4d[:, :, :, 1:target_n_steps]
+                
+                loss_chunk = Flux.mse(pred_subset, target_subset)
+
                 if isnan(loss_chunk) || isinf(loss_chunk)
                     @warn "Validation loss chunk is $loss_chunk at epoch $epoch. Skipping this chunk."
                     continue
@@ -128,8 +186,6 @@ function train_continuous_transformer!(
         if current_epoch_val_loss < best_val_loss
             best_val_loss = current_epoch_val_loss
             patience_counter = 0
-            # Optionally save best model here
-            # Example: Flux.Optimise.save("./best_model.bson", model)
         else
             patience_counter += 1
         end

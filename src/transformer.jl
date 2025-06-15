@@ -1,3 +1,8 @@
+using Flux
+using NNlib
+using DifferentialEquations
+using SciMLSensitivity
+
 # Cache for storing precomputed causal masks
 const CAUSAL_MASK_CACHE = Dict{Int, Matrix{Float32}}()
 
@@ -311,6 +316,89 @@ function (ff::FeedForward)(x::AbstractArray)
 end
 
 """
+    NeuralODE
+
+Neural ODE layer that takes latent_dim input and produces latent_dim output.
+The input must already be projected to latent_dim dimensions.
+Integrates the input for T time steps and returns a trajectory.
+The neural network can have multiple internal layers specified by node_layers vector.
+"""
+struct NeuralODE
+    neural_net::Chain     # Multi-layer dynamics in latent space
+    T::Float32            # Integration time
+    dt::Float32           # Time step size
+    
+    function NeuralODE(latent_dim::Int, node_layers::Vector{Int}=Int[], T::Float32=1.0f0, dt::Float32=0.1f0)
+        # Build the neural network layers
+        layers = []
+        
+        if isempty(node_layers)
+            # Default: single layer with identity activation
+            push!(layers, Dense(latent_dim, latent_dim, identity))
+        else
+            # First layer: latent_dim -> node_layers[1]
+            push!(layers, Dense(latent_dim, node_layers[1], tanh))
+            
+            # Internal layers: node_layers[i] -> node_layers[i+1]
+            for i in 1:(length(node_layers)-1)
+                push!(layers, Dense(node_layers[i], node_layers[i+1], tanh))
+            end
+            
+            # Final layer: node_layers[end] -> latent_dim (identity activation)
+            push!(layers, Dense(node_layers[end], latent_dim, identity))
+        end
+        
+        # Create the chain of layers
+        neural_net = Chain(layers...)
+        
+        new(neural_net, T, dt)
+    end
+    
+    # Constructor for functor reconstruction
+    NeuralODE(neural_net, T, dt) = new(neural_net, T, dt)
+end
+
+# Add Flux functor declaration for NeuralODE
+Flux.@functor NeuralODE
+
+function (node::NeuralODE)(x_latent::AbstractArray)
+    # x_latent should have shape (latent_dim, seq_len * batch_size)
+    latent_dim, n_flat = size(x_latent)
+    
+    # Define the ODE function in latent space
+    function ode_func(u, p, t)
+        # u has shape (latent_dim, seq_len * batch_size)
+        node.neural_net(u)
+    end
+    
+    # Time span for integration - use a cleaner approach
+    n_steps = max(1, Int(round(node.T / node.dt)))  # Ensure at least 1 step
+    time_points = Float32.(0:n_steps) .* node.dt  # Create exactly n_steps+1 points
+    tspan = (0.0f0, node.T)
+    
+    # Solve ODE for each time step we want to collect
+    prob = ODEProblem(ode_func, x_latent, tspan)
+    
+    # Use QuadratureAdjoint which should be more widely available
+    sol = solve(prob, Tsit5(), saveat=time_points, sensealg=QuadratureAdjoint())
+    
+    # Extract trajectory (excluding initial condition if we have enough points)
+    if length(sol.u) > 1
+        trajectory_latent = sol.u[2:end]  # Skip initial condition
+        actual_n_steps = length(trajectory_latent)
+    else
+        trajectory_latent = sol.u  # Keep the single point if that's all we have
+        actual_n_steps = 1
+    end
+    
+    # Stack trajectory: (latent_dim, seq_len * batch_size, actual_n_steps)
+    trajectory_latent_stacked = cat(trajectory_latent..., dims=3)
+    
+    # Final shape: (latent_dim, seq_len * batch_size, actual_n_steps)
+    return trajectory_latent_stacked
+end
+
+"""
     TransformerEncoderLayer
 
 Standard encoder layer that combines multi-head attention and feed-forward networks.
@@ -340,16 +428,58 @@ function TransformerEncoderLayer(d_model::Int, num_heads::Int, d_ff::Int, dropou
 end
 
 # Forward pass with residual connections and normalization
-function (layer::TransformerEncoderLayer)(x::AbstractArray, mask=nothing)
+function (layer::TransformerEncoderLayer)(x::AbstractArray, targets=nothing)
     # Multi-head attention with residual connection and layer norm
-    attended = layer.attention(x; mask=mask)
+    attended = layer.attention(x)
     attended = layer.dropout(attended)
     x1 = layer.norm1(x .+ attended)
     
     # Feed-forward with residual connection and layer norm
     transformed = layer.feed_forward(x1)
     transformed = layer.dropout(transformed)
-    layer.norm2(x1 .+ transformed)
+    x2 = layer.norm2(x1 .+ transformed)
+
+    return x2  # Return full tensor, not flattened
+end
+
+"""
+    NODELayer
+
+Standard encoder layer that combines multi-head attention and feed-forward networks.
+"""
+struct NODELayer
+        projection_in::Dense
+        neural_ode::NeuralODE
+        projection_out::Dense
+    
+    # Constructor for functor reconstruction
+    NODELayer(projection_in, neural_ode, projection_out) = 
+        new(projection_in, neural_ode, projection_out)
+end
+
+# Add Flux functor declaration for NODELayer
+Flux.@functor NODELayer
+
+function NODELayer(d_model::Int, latent_dim::Int, output_dim::Int, node_layers::Vector{Int}=Int[], T::Float32=1.0f0, dt::Float32=0.1f0)
+    projection_in = Dense(d_model, latent_dim)
+    neural_ode = NeuralODE(latent_dim, node_layers, T, dt)
+    projection_out = Dense(latent_dim, output_dim)
+    NODELayer(projection_in, neural_ode, projection_out)
+end
+
+# Forward pass with residual connections and normalization
+function (layer::NODELayer)(x::AbstractArray)
+    # Project to latent space
+    x_latent = layer.projection_in(x)
+
+    # Neural ODE integration to get trajectory
+    trajectory_output = layer.neural_ode(x_latent)  # (latent_dim, seq_len * batch_size, n_steps)
+
+    # Project back to output dimension
+    trajectory_output = layer.projection_out(trajectory_output)  # (output_dim, seq_len * batch_size, n_steps)
+
+    # Return the trajectory output
+    return trajectory_output  # Return the trajectory output
 end
 
 """
@@ -361,17 +491,20 @@ Processes delay embedding vectors directly with attention across embedding vecto
 struct ContinuousTransformerModel
     input_projection::Dense
     transformer_layers::Vector{TransformerEncoderLayer}
-    norm::LayerNorm
-    output_projection::Dense
+    node_layer::NODELayer
     
     function ContinuousTransformerModel(;
         input_dim::Int,
         output_dim::Int,
         d_model::Int,
+        latent_dim::Int,
         num_heads::Int,
         num_layers::Int,
         dropout_rate::Float32 = 0.1f0,
-        d_ff::Union{Int,Nothing} = nothing
+        d_ff::Union{Int,Nothing} = nothing,
+        node_layers::Vector{Int} = Int[],
+        T::Float32 = 1.0f0,
+        dt::Float32 = 0.1f0
     )
         # Set feed-forward dimension if not provided (standard is 4x d_model)
         d_ff_actual = isnothing(d_ff) ? 4 * d_model : d_ff
@@ -382,81 +515,53 @@ struct ContinuousTransformerModel
         # Create transformer encoder layers without positional encoding
         layers = TransformerEncoderLayer[]
         for _ in 1:num_layers
+            # Fix: Use correct constructor parameters
             layer = TransformerEncoderLayer(d_model, num_heads, d_ff_actual, Float64(dropout_rate))
             push!(layers, layer)
         end
         
-        # Final layer normalization
-        norm = LayerNorm(d_model)
-        
-        # Project back to output dimension
-        output_proj = Dense(d_model, output_dim)
-        
-        new(input_proj, layers, norm, output_proj)
+        # Create NODELayer for final projection to output dimension
+        node_layer = NODELayer(d_model, latent_dim, output_dim, node_layers, T, dt)
+
+        # Create the model with input projection, transformer layers, and NODE layer
+        new(input_proj, layers, node_layer)
     end
     
     # Constructor for reconstruction
-    ContinuousTransformerModel(input_projection, transformer_layers, norm, output_projection) = 
-        new(input_projection, transformer_layers, norm, output_projection)
+    ContinuousTransformerModel(input_projection, transformer_layers, node_layer) = 
+        new(input_projection, transformer_layers, node_layer)
 end
 
 Flux.@functor ContinuousTransformerModel
 
 function (model::ContinuousTransformerModel)(x)
-    # Handle both 2D and 3D inputs
-    if ndims(x) == 2
-        # x shape: (embedding_dim, seq_len) - single batch case
-        # Project inputs to model dimension
-        x_proj = model.input_projection(x)  # (d_model, seq_len)
+    # x shape: (embedding_dim, seq_len, n_batches) - multiple batch case
+    embedding_dim, seq_len, n_batches = size(x)
         
-        # Reshape for transformer: (d_model, seq_len, 1) - treat as single batch
-        x_reshaped = reshape(x_proj, size(x_proj, 1), size(x_proj, 2), 1)
+    # Reshape to process all batches at once: (embedding_dim, seq_len * n_batches)
+    x_flat = reshape(x, embedding_dim, seq_len * n_batches)
         
-        # Pass through transformer encoder layers
-        for layer in model.transformer_layers
-            x_reshaped = layer(x_reshaped)
-        end
+    # Project inputs to model dimension
+    x_proj_flat = model.input_projection(x_flat)  # (d_model, seq_len * n_batches)
         
-        # Apply final layer normalization
-        x_encoded = model.norm(x_reshaped)
+    # Reshape back to include batch dimension: (d_model, seq_len, n_batches)
+    x_proj = reshape(x_proj_flat, size(x_proj_flat, 1), seq_len, n_batches)
         
-        # Remove batch dimension: (d_model, seq_len)
-        x_encoded = x_encoded[:, :, 1]
-        
-        # Project to output for each sample
-        output = model.output_projection(x_encoded)  # (output_dim, seq_len)
-        
-        return output
-    else
-        # x shape: (embedding_dim, seq_len, n_batches) - multiple batch case
-        embedding_dim, seq_len, n_batches = size(x)
-        
-        # Reshape to process all batches at once: (embedding_dim, seq_len * n_batches)
-        x_flat = reshape(x, embedding_dim, seq_len * n_batches)
-        
-        # Project inputs to model dimension
-        x_proj_flat = model.input_projection(x_flat)  # (d_model, seq_len * n_batches)
-        
-        # Reshape back to include batch dimension: (d_model, seq_len, n_batches)
-        x_proj = reshape(x_proj_flat, size(x_proj_flat, 1), seq_len, n_batches)
-        
-        # Pass through transformer encoder layers
-        for layer in model.transformer_layers
-            x_proj = layer(x_proj)
-        end
-        
-        # Apply final layer normalization
-        x_encoded = model.norm(x_proj)
-        
-        # Flatten for output projection: (d_model, seq_len * n_batches)
-        x_encoded_flat = reshape(x_encoded, size(x_encoded, 1), seq_len * n_batches)
-        
-        # Project to output
-        output_flat = model.output_projection(x_encoded_flat)  # (output_dim, seq_len * n_batches)
-        
-        # Reshape back to batch format: (output_dim, seq_len, n_batches)
-        output = reshape(output_flat, size(output_flat, 1), seq_len, n_batches)
-
-        return output
+    # Pass through transformer encoder layers
+    for layer in model.transformer_layers
+        x_proj = layer(x_proj)
     end
+
+    # Fix: Flatten for NODE layer input
+    x_proj_flat = reshape(x_proj, size(x_proj, 1), :)  # (d_model, seq_len * n_batches)
+    
+    # Apply final NODE layer
+    x_encoded = model.node_layer(x_proj_flat) # (output_dim, seq_len * n_batches, n_steps)
+
+    # Fix: Correct reshaping for final output
+    output_dim, _, n_steps = size(x_encoded)
+    x_encoded_reshaped = reshape(x_encoded, output_dim, seq_len, n_batches, n_steps)
+
+    # Return the final output
+    return x_encoded_reshaped  # (output_dim, seq_len, n_batches, n_steps)
 end

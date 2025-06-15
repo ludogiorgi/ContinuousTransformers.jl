@@ -1,4 +1,3 @@
-using Revise
 using TimeSeriesTransformers
 using Flux
 using LinearAlgebra
@@ -25,7 +24,9 @@ println("\n1. Generating Lorenz 63 time series data...")
 data, dt_lorenz = generate_lorenz63_data(100000, tspan=(0.0, 5000.0), return_dt=true)
 
 # Extract the y-variable for time series prediction
-y_data = data[:, 2]
+y_data = vec(data[:, 2])  # Convert column to vector
+println("y_data type: $(typeof(y_data))")
+println("y_data size: $(size(y_data))")
 
 println("Generated $(length(y_data)) data points")
 println("Data range: [$(round(minimum(y_data), digits=3)), $(round(maximum(y_data), digits=3))]")
@@ -47,8 +48,8 @@ println("  - Enabled: $(norm_info.normalized)")
 if norm_info.normalized
     println("  - Original range: [$(round(norm_info.original_range[1], digits=3)), $(round(norm_info.original_range[2], digits=3))]")
     println("  - Normalized range: [$(round(norm_info.normalized_range[1], digits=3)), $(round(norm_info.normalized_range[2], digits=3))]")
-    println("  - Mean: $(round(norm_info.mean, digits=3))")
-    println("  - Std: $(round(norm_info.std, digits=3))")
+    println("  - Mean: $(round(norm_info.mean[1], digits=3))")
+    println("  - Std: $(round(norm_info.std[1], digits=3))")
 end
 
 # ===================================================================
@@ -63,6 +64,11 @@ num_heads = 8          # Number of attention heads
 num_layers = 1         # Number of transformer layers
 dropout_rate = 0.1f0   # Dropout rate for regularization (Float32)
 
+# Neural ODE parameters
+T = 1.0f0             # Integration time for Neural ODE
+dt = dt_lorenz        # Time step for Neural ODE integration
+node_layers = Int[64, 32] # Internal layers: latent_dim -> 64 -> 32 -> latent_dim
+
 # Validate configuration
 head_dim = d_model ÷ num_heads
 if d_model % num_heads != 0
@@ -76,15 +82,22 @@ println("  - Transformer layers: $num_layers")
 println("  - Dropout rate: $dropout_rate")
 println("  - Input dimension: $embedding_dim")
 println("  - Output dimension: 1")
+println("  - Neural ODE integration time (T): $T")
+println("  - Neural ODE time step (dt): $dt")
+println("  - Neural ODE internal layers: $node_layers")
 
 # Create the continuous transformer model
 model = ContinuousTransformerModel(
     input_dim = embedding_dim,
     output_dim = 1,  # Predicting single next value
     d_model = d_model,
+    latent_dim = 3, 
     num_heads = num_heads,
     num_layers = num_layers,
-    dropout_rate = dropout_rate
+    dropout_rate = dropout_rate,
+    node_layers = node_layers,  # Add the internal layers specification
+    T = 10*dt,           # Integration time parameter
+    dt = dt          # Time step parameter
 )
 
 # Count parameters
@@ -100,7 +113,7 @@ println("\n4. Training transformer model...")
 model, train_losses, val_losses = train_continuous_transformer!(
     model, 
     processor;
-    epochs = 60,
+    epochs = 120,
     seq_len = 32,                         # Sequence length for training
     val_seq_len = 256,                    # Sequence length for validation batches (adjust as needed, 256 is the default)
     learning_rate = 1f-3,
@@ -147,5 +160,3 @@ combined_plot, ensemble_preds, ensemble_obs, horizons, rmse_values = combined_pr
 savefig(combined_plot, "lorenz_transformer_analysis.png")
 println("Figure saved as 'lorenz_transformer_analysis.png'")
 display(combined_plot)
-
-dt_lorenz
