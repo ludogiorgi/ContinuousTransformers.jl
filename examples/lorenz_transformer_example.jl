@@ -1,5 +1,5 @@
 using Revise
-using TimeSeriesTransformers
+using ContinuousTransformers
 using Flux
 using LinearAlgebra
 using Random

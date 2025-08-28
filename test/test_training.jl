@@ -3,7 +3,7 @@ Test training functionality (minimal tests for speed)
 """
 
 using Test
-using TimeSeriesTransformers
+using ContinuousTransformers
 
 @testset "Training Tests" begin
     

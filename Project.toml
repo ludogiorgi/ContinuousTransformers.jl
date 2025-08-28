@@ -1,4 +1,4 @@
-name = "TimeSeriesTransformers"
+name = "ContinuousTransformers"
 uuid = "e0b72ca3-7e1a-53d9-9cf4-701e71c95a06"
 authors = ["Author <author@example.com>"]
 version = "0.1.0"

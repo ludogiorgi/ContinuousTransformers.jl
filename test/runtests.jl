@@ -1,5 +1,5 @@
 """
-Test suite for TimeSeriesTransformers.jl
+Test suite for ContinuousTransformers.jl
 
 This test suite covers the core functionality needed before publishing:
 1. Package loading and basic imports
@@ -11,7 +11,7 @@ This test suite covers the core functionality needed before publishing:
 """
 
 using Test
-using TimeSeriesTransformers
+using ContinuousTransformers
 using Random
 using Statistics
 using Flux
@@ -19,7 +19,7 @@ using Flux
 # Set seed for reproducible tests
 Random.seed!(12345)
 
-println("Starting TimeSeriesTransformers.jl test suite...")
+println("Starting ContinuousTransformers.jl test suite...")
 
 # Include test modules
 include("test_data_generation.jl")

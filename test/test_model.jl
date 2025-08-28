@@ -3,7 +3,7 @@ Test TransformerModel functionality
 """
 
 using Test
-using TimeSeriesTransformers
+using ContinuousTransformers
 using Flux
 
 @testset "TransformerModel Tests" begin
@@ -89,7 +89,7 @@ using Flux
         @test size(pos_output) == size(test_input)
         
         # Test multi-head attention
-        mha = TimeSeriesTransformers.MultiHeadAttention(d_model, num_heads)
+        mha = ContinuousTransformers.MultiHeadAttention(d_model, num_heads)
         attn_output = mha(test_input)
         @test size(attn_output) == size(test_input)
     end

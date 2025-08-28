@@ -2,7 +2,7 @@
 Test TimeSeriesProcessor functionality
 """
 
-using TimeSeriesTransformers
+using ContinuousTransformers
 using Statistics
 
 @testset "TimeSeriesProcessor Tests" begin
@@ -22,7 +22,7 @@ using Statistics
             @test length(processor.normalized_data) == length(y_data)
             
             # Run clustering process
-            TimeSeriesTransformers.process(processor)
+            ContinuousTransformers.process(processor)
             
             # After processing, cluster centers should be populated
             @test length(processor.cluster_centers) > 0
@@ -65,7 +65,7 @@ using Statistics
         processor = TimeSeriesProcessor(simple_data, 3)
         
         # Run clustering process
-        TimeSeriesTransformers.process(processor)
+        ContinuousTransformers.process(processor)
         
         # Test that clustering produces reasonable results
         @test length(processor.cluster_centers) == 3
@@ -83,7 +83,7 @@ using Statistics
         processor = TimeSeriesProcessor(minimal_data, 2)
         
         # Run clustering process
-        TimeSeriesTransformers.process(processor)
+        ContinuousTransformers.process(processor)
         
         @test length(processor.cluster_centers) == 2
         

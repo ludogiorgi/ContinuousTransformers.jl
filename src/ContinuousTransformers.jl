@@ -1,4 +1,4 @@
-module TimeSeriesTransformers
+module ContinuousTransformers
 
 import Flux
 import Flux: Dense, Dropout, LayerNorm, softmax, relu

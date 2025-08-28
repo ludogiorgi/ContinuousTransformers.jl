@@ -3,7 +3,7 @@ Test prediction and generation functionality
 """
 
 using Test
-using TimeSeriesTransformers
+using ContinuousTransformers
 using Flux
 
 @testset "Prediction and Generation Tests" begin
@@ -26,7 +26,7 @@ using Flux
         test_sequence = rand(1:4, 6)  # Random sequence of cluster indices
         
         # Test predict function exists and returns reasonable output
-        if isdefined(TimeSeriesTransformers, :predict)
+        if isdefined(ContinuousTransformers, :predict)
             prediction = predict(model, test_sequence)
             @test prediction isa Integer
             @test 1 <= prediction <= 4
@@ -55,7 +55,7 @@ using Flux
         )
         
         # Test generation if function exists
-        if isdefined(TimeSeriesTransformers, :generate_time_series)
+        if isdefined(ContinuousTransformers, :generate_time_series)
             seed_sequence = rand(1:5, 8)
             generation_length = 20
             

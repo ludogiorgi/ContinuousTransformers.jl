@@ -24,7 +24,7 @@ The continuous transformer predicts future values directly from continuous data 
 ```
 ContinuousTransformers.jl
 ├── src/
-│   ├── TimeSeriesTransformers.jl     # Package entry point and exports
+│   ├── ContinuousTransformers.jl     # Package entry point and exports
 │   ├── transformer.jl                # Core transformer components and model (continuous)
 │   ├── delay_embedding_utils.jl      # Delay embedding, normalization, data utilities
 │   ├── lorenz_data.jl                # Lorenz-63 data generation helpers
@@ -43,7 +43,7 @@ using Pkg
 Pkg.activate(".")
 Pkg.instantiate()
 
-using TimeSeriesTransformers
+using ContinuousTransformers
 
 # Generate Lorenz-63 data and extract a single component (e.g., y)
 data, dt = generate_lorenz63_data(100_000, tspan=(0.0, 5000.0), return_dt=true)
@@ -93,7 +93,7 @@ See `examples/lorenz_transformer_example.jl` for a larger, fully reproducible sc
 
 ## API Summary
 
-From `TimeSeriesTransformers`:
+From `ContinuousTransformers`:
 
 - **Model and layers**: `MultiHeadAttention`, `PositionalEncoding`, `FeedForward`, `TransformerEncoderLayer`, `ContinuousTransformerModel`
 - **Threading and masking**: `set_threading`, `create_causal_mask`
