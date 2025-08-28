@@ -1,180 +1,138 @@
-# Transformer-Based Time Series Prediction
+## Continuous Transformers for Time Series (Julia)
 
-A Julia implementation of transformer models for time series forecasting with comprehensive analysis capabilities.
+This repository implements a transformer architecture trained on continuous-valued time series for next-step prediction. It is one of two companion repositories:
+
+- This repo: continuous-input transformer using delay-embedded real-valued sequences.
+- Companion repo: discrete-input transformer trained on clustered (discretized) sequences.
+
+If you are looking for the discrete/clustered variant, please refer to the companion repository. This repository is specifically for the continuous-input model.
 
 ## Overview
 
-This project implements transformer neural networks for predicting time series data using a cluster-based approach. The model discretizes continuous time series into clusters and learns to predict future cluster transitions, enabling both short-term and long-term forecasting.
+The continuous transformer predicts future values directly from continuous data using delay embeddings. It is built on Flux.jl and includes utilities for data generation (Lorenz-63), delay embedding, training, forecasting, and analysis of prediction quality across horizons.
 
 ## Features
 
-- **Transformer Architecture**: Custom transformer implementation with attention mechanisms
-- **Cluster-Based Prediction**: Discretizes continuous data into clusters for robust prediction
-- **Ensemble Forecasting**: Generates probabilistic predictions with confidence intervals
-- **Comprehensive Analysis**: Multi-panel analysis including ensemble predictions, delayed forecasts, and statistical comparisons
-- **Reproducible Results**: Fixed random seeds ensure consistent analysis across runs
-- **Validation Metrics**: Automated accuracy computation and model evaluation
+- **Continuous input pipeline**: delay-embedding of real-valued time series with optional normalization
+- **Transformer encoder**: multi-head attention, feed-forward blocks, layer norm, dropout
+- **Continuous output**: direct regression to next value(s) (no discretization)
+- **Training utilities**: minibatch training with early stopping and validation batching
+- **Prediction & analysis**: single/ensemble forecasts, horizon-scaling RMSE, PDF and ACF comparison plots
 
 ## Project Structure
 
 ```
-TimeSeriesTransformers/
+ContinuousTransformers.jl
 ├── src/
-│   ├── analysis_callback.jl    # Comprehensive model analysis and visualization
-│   ├── ensemble_predict.jl     # Ensemble prediction utilities
-│   ├── transformer_model.jl    # Transformer architecture implementation
-│   ├── data_processing.jl      # Time series preprocessing and clustering
-│   └── validation.jl           # Model validation and accuracy computation
-├── figures/                    # Generated analysis plots
-├── data/                      # Input time series data
-└── README.md                  # This file
+│   ├── TimeSeriesTransformers.jl     # Package entry point and exports
+│   ├── transformer.jl                # Core transformer components and model (continuous)
+│   ├── delay_embedding_utils.jl      # Delay embedding, normalization, data utilities
+│   ├── lorenz_data.jl                # Lorenz-63 data generation helpers
+│   ├── training.jl                   # Training loop for ContinuousTransformerModel
+│   ├── prediction_utils.jl           # Forecasting and analysis helpers
+│   └── callback.jl                   # Combined analysis (plots, RMSE scaling, PDFs, ACFs)
+├── examples/
+│   └── lorenz_transformer_example.jl # End-to-end training + analysis on Lorenz-63
+└── test/                             # Test suite (may include legacy discrete tests)
 ```
 
-## Key Components
+## Quickstart
 
-### Time Series Processing
-- Automatic clustering of continuous data into discrete states
-- Sequence generation for supervised learning
-- Data normalization and preprocessing
-
-### Transformer Model
-- Multi-head attention mechanism
-- Positional encoding for temporal relationships
-- Configurable architecture (layers, heads, dimensions)
-- Softmax output for cluster probability prediction
-
-### Analysis Framework
-- **Ensemble Predictions**: 50-member ensembles with confidence intervals
-- **Delayed Forecasting**: Multi-step ahead prediction analysis (t+5, t+10, t+20)
-- **Statistical Validation**: PDF and autocorrelation function comparisons
-- **Reproducible Analysis**: Fixed starting points and random seeds
-
-## Installation
-
-1. Clone the repository:
-```bash
-git clone <repository-url>
-cd TimeSeriesTransformers
-```
-
-2. Install required Julia packages:
 ```julia
 using Pkg
-Pkg.add(["Flux", "Plots", "Statistics", "StatsBase", "KernelDensity", "Random"])
-```
+Pkg.activate(".")
+Pkg.instantiate()
 
-## Usage
+using TimeSeriesTransformers
 
-### Basic Model Training
-```julia
-include("src/transformer_model.jl")
-include("src/data_processing.jl")
+# Generate Lorenz-63 data and extract a single component (e.g., y)
+data, dt = generate_lorenz63_data(100_000, tspan=(0.0, 5000.0), return_dt=true)
+y = data[:, 2]
 
-# Load and preprocess data
-processor = TimeSeriesProcessor(data, n_clusters=10)
-X_train, y_train = create_sequences(processor, sequence_length=20)
+# Build delay embedding processor (continuous inputs)
+embedding_dim = 8
+processor = DelayEmbeddingProcessor(y, embedding_dim; normalize=true)
 
-# Train transformer model
-model = create_transformer_model(vocab_size=10, d_model=64, n_heads=4, n_layers=2)
-train!(model, X_train, y_train, epochs=100)
-```
+# Define and create the continuous transformer
+model = ContinuousTransformerModel(
+    input_dim = embedding_dim,
+    output_dim = 1,
+    d_model = 32,
+    num_heads = 8,
+    num_layers = 1,
+    dropout_rate = 0.1f0,
+)
 
-### Comprehensive Analysis
-```julia
-include("src/analysis_callback.jl")
+# Train
+model, train_losses, val_losses = train_continuous_transformer!(
+    model, processor;
+    epochs = 60,
+    seq_len = 32,
+    val_seq_len = 256,
+    learning_rate = 1f-3,
+    early_stopping_patience = 50,
+    verbose = true,
+    n_training_steps_per_epoch = 500,
+    training_batch_size = 10,
+)
 
-# Initialize analysis parameters for reproducibility
-initialize_analysis_params!(X_val, y_val)
+# Prepare validation data and run analysis
+inputs, targets = get_embedding_data(processor)
+n_total = size(inputs, 2)
+n_train = Int(round(0.8 * n_total))
+val_inputs_full = inputs[:, n_train+1:n_total]
+val_targets_full = targets[:, n_train+1:n_total]
 
-# Generate comprehensive analysis plot
-fig = comprehensive_analysis_callback(
-    model, processor, X_val, y_val, y_data,
-    save_path="figures/model_analysis.png",
-    verbose=true
+combined_plot, preds, obs, horizons, rmse_values = combined_prediction_analysis(
+    model, val_inputs_full, val_targets_full;
+    n_ens=100, seq_len=32, n_preds_example=100, max_n_preds=150, n_pred_steps=15, seed=42, dt=dt
 )
 ```
 
-### Ensemble Predictions
+See `examples/lorenz_transformer_example.jl` for a larger, fully reproducible script.
+
+## API Summary
+
+From `TimeSeriesTransformers`:
+
+- **Model and layers**: `MultiHeadAttention`, `PositionalEncoding`, `FeedForward`, `TransformerEncoderLayer`, `ContinuousTransformerModel`
+- **Threading and masking**: `set_threading`, `create_causal_mask`
+- **Delay embedding & normalization**: `DelayEmbeddingProcessor`, `create_delay_embedding`, `get_training_sequences`, `get_embedding_data`, `normalize_value`, `denormalize_value`, `denormalize_predictions`, `get_normalization_info`
+- **Training**: `train_continuous_transformer!`
+- **Prediction & analysis**: `predict_next_values`, `generate_ensemble_predictions`, `analyze_prediction_horizon_scaling`, `combined_prediction_analysis`, `autocorr`
+- **Data generation**: `lorenz63!`, `generate_lorenz63_data`
+
+## Requirements
+
+- Julia ≥ 1.11 (per `Project.toml`)
+- Major dependencies: Flux.jl, DifferentialEquations.jl, Plots.jl, Statistics, StatsBase, KernelDensity, Zygote, NNlib
+
+Install all dependencies via:
+
 ```julia
-include("src/ensemble_predict.jl")
-
-# Generate ensemble forecasts
-trajectories, values = ensemble_predict(
-    model, processor, initial_sequence, 
-    n_ensemble=50, pred_steps=20
-)
-
-# Calculate prediction statistics
-ensemble_mean = mean(values, dims=2)
-confidence_intervals = [quantile(values[i, :], [0.05, 0.95]) for i in 1:pred_steps]
+using Pkg
+Pkg.activate(".")
+Pkg.instantiate()
 ```
 
-## Analysis Output
+## Notes on the Companion (Discrete) Repository
 
-The comprehensive analysis generates a 6-row visualization:
-
-1. **Rows 1-2**: Four ensemble predictions from different validation points with confidence intervals
-2. **Rows 3-5**: Delayed prediction comparisons at t+5, t+10, and t+20 steps
-3. **Row 6**: Statistical analysis comparing predicted vs. true probability distributions and autocorrelations
-
-Each analysis uses fixed starting points and random seeds to ensure reproducible results across training epochs.
-
-## Model Validation
-
-The framework includes automated validation metrics:
-- **Classification Accuracy**: Percentage of correctly predicted cluster transitions
-- **Mean Absolute Error**: Average prediction error for delayed forecasts
-- **Statistical Divergence**: Comparison of predicted vs. true data distributions
-- **Temporal Correlation**: Autocorrelation function analysis
-
-## Key Features for Research
-
-### Reproducibility
-- Fixed random seeds for all stochastic components
-- Deterministic starting points for analysis
-- Consistent ensemble generation across runs
-
-### Comprehensive Evaluation
-- Multiple prediction horizons (1-step to 20-step ahead)
-- Probabilistic and deterministic forecasting modes
-- Statistical validation of long-term behavior
-
-### Visualization
-- Publication-ready plots with confidence intervals
-- Multi-panel analysis for complete model assessment
-- Automatic figure generation and saving
-
-## Dependencies
-
-- **Julia 1.6+**
-- **Flux.jl**: Neural network framework
-- **Plots.jl**: Visualization and plotting
-- **Statistics.jl**: Statistical functions
-- **StatsBase.jl**: Extended statistical functions
-- **KernelDensity.jl**: Probability density estimation
-- **Random.jl**: Random number generation
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make changes with appropriate tests
-4. Submit a pull request with detailed description
+The discrete repository discretizes continuous series into cluster indices and trains a transformer on sequences of symbols. This repository does not perform discretization and instead works directly on continuous delay-embedded vectors. Use this repo when you want numeric next-value prediction rather than next-cluster classification.
 
 ## License
 
-This project is available under the MIT License. See LICENSE file for details.
+This project is available under the MIT License. See `LICENSE` for details.
 
 ## Citation
 
 If you use this code in your research, please cite:
 
 ```bibtex
-@software{transformer_timeseries,
-  title={Transformer-Based Time Series Prediction with Comprehensive Analysis},
-  author={Ludovico Theo Giorgini},
-  year={2024},
-  url={[Repository URL]}
+@software{continuous_transformers_julia,
+  title   = {Continuous Transformers for Time Series in Julia},
+  author  = {Ludovico Theo Giorgini},
+  year    = {2024},
+  url     = {<repository-url>}
 }
 ```
 
@@ -183,7 +141,3 @@ If you use this code in your research, please cite:
 **Ludovico Theo Giorgini**  
 Email: ludogio@mit.edu  
 Massachusetts Institute of Technology
-
-## Contact
-
-For questions or issues, please open a GitHub issue or contact ludogio@mit.edu.
